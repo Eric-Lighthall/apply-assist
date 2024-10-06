@@ -9,6 +9,7 @@ from pynput import keyboard, mouse
 import time
 import difflib
 import pyperclip
+import queue
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,7 @@ class KeyListener:
         self.ocr_processor = ocr_processor
         self.llm_handler = llm_handler
         self.control_pressed = False
+        self.click_queue = queue.Queue()
 
     def on_press(self, key):
         if key == keyboard.Key.ctrl_l or key == keyboard.Key.ctrl_r:
@@ -28,7 +30,14 @@ class KeyListener:
 
     def on_click(self, x, y, button, pressed):
         if pressed and self.control_pressed and button == mouse.Button.left:
-            threading.Thread(target=self.process_with_ocr, args=(x, y)).start()
+            self.click_queue.put((x, y))
+            print(f"Added click at ({x}, {y}) to queue.")
+
+    def process_click_queue(self):
+        while True:
+            x, y = self.click_queue.get()
+            self.process_with_ocr(x, y)
+            self.click_queue.task_done()
 
     def process_with_ocr(self, x, y):
         logger.info(f"Processing click at ({x}, {y})")
@@ -47,12 +56,10 @@ class KeyListener:
                 print(f"\nExtracted text above click: {full_text}")
                 logger.info(f"Extracted text above click: {full_text}")
 
-                # Process the extracted text with the LLM
                 llm_response = self.llm_handler.process_text(full_text)
                 print(f"\nLLM Response:\n{llm_response}")
                 logger.info(f"LLM Response: {llm_response}")
 
-                # Map the LLM response to data
                 data_mapping = {
                     'first_name': 'Eric',
                     'middle_name': 'Gordon',
@@ -99,11 +106,13 @@ class KeyListener:
             logger.exception(f"Error in process_with_ocr: {e}")
 
     def start(self):
+        threading.Thread(target=self.process_click_queue, daemon=True).start()
+
         keyboard_listener = keyboard.Listener(on_press=self.on_press, on_release=self.on_release)
         mouse_listener = mouse.Listener(on_click=self.on_click)
         keyboard_listener.start()
         mouse_listener.start()
-        print("Listeners started. Press Ctrl+Click near an input box to perform OCR.")
-        logger.info("Listeners started. Press Ctrl+Click on an input box.")
+        print("Listeners started. Press Ctrl+Click on input boxes to fill them automatically.")
+        logger.info("Listeners started. Press Ctrl+Click on input boxes to fill them automatically.")
         keyboard_listener.join()
         mouse_listener.join()
