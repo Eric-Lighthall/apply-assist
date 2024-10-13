@@ -14,6 +14,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+import cv2
+import os
+import numpy as np
+from datetime import datetime
+
 class InputBoxProcessor:
     def __init__(self):
         self.ocr_processor = OCRProcessor(languages=['en'], use_gpu=True)
@@ -21,26 +26,73 @@ class InputBoxProcessor:
         self.input_box_queue = deque()
         self.screenshot_counter = 0
         self.ocr_screenshot_dir = "./ocr_screenshots"
+        self.debug_image_dir = "./debug_images"
         os.makedirs(self.ocr_screenshot_dir, exist_ok=True)
+        os.makedirs(self.debug_image_dir, exist_ok=True)
 
     def detect_input_boxes(self, image):
         image_cv = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
         gray = cv2.cvtColor(image_cv, cv2.COLOR_BGR2GRAY)
-        gray = cv2.equalizeHist(gray)
-        thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C, cv2.THRESH_BINARY_INV, 11, 2)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        morph = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel)
-        contours, _ = cv2.findContours(morph, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-            aspect_ratio = w / float(h)
-            area = cv2.contourArea(contour)
-            if 0.9 <= aspect_ratio <= 10 and w > 50 and h > 20 and area > 1000:
-                self.input_box_queue.append((x, y, w, h))
-                cv2.rectangle(image_cv, (x, y), (x + w, y + h), (0, 255, 0), 2)
-
-        cv2.imwrite("./results/result.png", image_cv)
+        
+        # Edge detection
+        edges = cv2.Canny(gray, 50, 150)
+        
+        # Dilate the edges to connect nearby edges
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        dilated = cv2.dilate(edges, kernel, iterations=2)
+        
+        # Find contours on the dilated edge image
+        contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        debug_image = image_cv.copy()
+        print(f"Total contours found: {len(contours)}")
+        
+        for i, contour in enumerate(contours):
+            # Approximate the contour to a polygon
+            epsilon = 0.04 * cv2.arcLength(contour, True)
+            approx = cv2.approxPolyDP(contour, epsilon, True)
+            
+            # Check if the polygon has 4 vertices (rectangle) or is a long straight line
+            if len(approx) == 4 or (len(approx) == 2 and cv2.arcLength(contour, True) > 200):
+                x, y, w, h = cv2.boundingRect(contour)
+                aspect_ratio = w / float(h)
+                area = cv2.contourArea(contour)
+                
+                # Adjusted criteria for input boxes: allow for very wide boxes
+                if ((w > 100 and h > 20 and area > 3000 and 1.5 <= aspect_ratio <= 50) or
+                    (w > 300 and 10 <= h <= 50)):  # Special case for very wide, short boxes
+                    
+                    # Check if the rectangle is relatively "clean" (not filled with text)
+                    mask = np.zeros(gray.shape, np.uint8)
+                    cv2.drawContours(mask, [contour], 0, 255, -1)
+                    roi = cv2.bitwise_and(edges, mask)
+                    if cv2.countNonZero(roi) < 0.15 * area:  # Relaxed threshold for wide boxes
+                        # Additional check for very wide boxes: ensure it's not just a line
+                        if h > 5 or (h <= 5 and cv2.countNonZero(roi) > 0):
+                            self.input_box_queue.append((x, y, w, h))
+                            cv2.drawContours(debug_image, [contour], 0, (0, 255, 0), 2)
+                            print(f"Box {i}: x={x}, y={y}, w={w}, h={h}, aspect_ratio={aspect_ratio:.2f}, area={area}")
+                        else:
+                            cv2.drawContours(debug_image, [contour], 0, (255, 255, 0), 1)  # Yellow for possible lines
+                    else:
+                        cv2.drawContours(debug_image, [contour], 0, (255, 0, 0), 1)  # Blue for ignored due to internal content
+                else:
+                    cv2.drawContours(debug_image, [contour], 0, (0, 0, 255), 1)  # Red for rejected
+                    print(f"Rejected {i}: x={x}, y={y}, w={w}, h={h}, aspect_ratio={aspect_ratio:.2f}, area={area}")
+        
+        print(f"Detected {len(self.input_box_queue)} input boxes")
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        debug_image_path = os.path.join(self.debug_image_dir, f"detected_boxes_{timestamp}.png")
+        cv2.imwrite(debug_image_path, debug_image)
+        print(f"Saved debug image with detected boxes: {debug_image_path}")
+        
+        # Save the original image and edge image for comparison
+        original_image_path = os.path.join(self.debug_image_dir, f"original_image_{timestamp}.png")
+        cv2.imwrite(original_image_path, image_cv)
+        edge_image_path = os.path.join(self.debug_image_dir, f"edge_image_{timestamp}.png")
+        cv2.imwrite(edge_image_path, edges)
+        print(f"Saved original and edge images: {original_image_path}, {edge_image_path}")
 
     def process_input_boxes(self, base_x, base_y):
         while self.input_box_queue:

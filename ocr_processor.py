@@ -43,6 +43,8 @@ class OCRProcessor:
 
             full_text = ' '.join(extracted_text)
             logger.debug(f"Extracted text: {full_text}")
+            print(f"OCR Result: {full_text}")
+
 
             self.save_image_with_boxes(image, formatted_results)
 
